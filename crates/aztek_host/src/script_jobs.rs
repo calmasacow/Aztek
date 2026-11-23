@@ -307,6 +307,9 @@ pub fn scan(s: &mut Session) -> Vec<Value> {
 
 /// Script nodes of the given script types: their before or after scripts, as callbacks.
 pub fn scene_scripts(s: &mut Session, script_types: &[i64], before: bool) -> Vec<Value> {
+    if aztek_scene::ma_file::protects_opened_history(s) {
+        return Vec::new();
+    }
     let mut out = Vec::new();
     let g = &mut s.graph;
     let ids: Vec<NodeId> = g.nodes().into_iter().filter(|&i| g.node(i).is_some_and(|n| n.ty().name == aztek_scene::script_node::TYPE)).collect();
@@ -474,6 +477,9 @@ fn with_ui_path(n: &str) -> String {
 }
 
 fn script_node(s: &mut Session, a: &Args) -> CmdResult {
+    if aztek_scene::ma_file::protects_opened_history(s) && (a.bool("executeBefore") || a.bool("executeAfter")) {
+        fail!("scriptNode: embedded scripts are disabled for this scene.");
+    }
     let get_str = |s: &mut Session, path: &str, attr: &str| -> CmdResult {
         let p = s.graph.plug(&format!("{path}.{attr}")).map_err(|e| CommandError::new(e.to_string()))?;
         Ok(match s.graph.value(&p).map_err(|e| CommandError::new(e.to_string()))? {

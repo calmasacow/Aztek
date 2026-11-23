@@ -21,6 +21,7 @@ use ArgType::{Bool as B, Float as F, Int as I, List as L, String as S};
 /// Scene and session settings the commands in this module and its neighbours hold.
 #[derive(Default)]
 pub struct Extras {
+    pub(crate) opened_history: Option<crate::ma_file::OpenedHistory>,
     pub cycle_check: Option<bool>,
     pub evaluation_mode: Option<String>,
     pub thread_count: Option<i64>,

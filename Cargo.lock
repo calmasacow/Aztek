@@ -217,6 +217,7 @@ dependencies = [
  "rand_mt",
  "rayon",
  "regex-lite",
+ "same-file",
  "serde_json",
  "sysinfo",
  "thiserror 2.0.21",

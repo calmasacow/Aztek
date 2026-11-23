@@ -511,20 +511,21 @@ fn save(s: &mut Session, a: &Args) -> Option<CmdResult> {
         if st(|x| x.rename_to_save) && given.is_none() {
             fail!("file: the scene has to be renamed before it can be saved");
         }
-        if let Some(t) = ty {
-            s.scene_type = Some(Format::of_type(t)?);
-        }
+        let scene_type = ty.map(Format::of_type).transpose()?.or(s.scene_type);
         let Some(path) = given.or_else(|| s.scene_path.clone()) else { fail!("file: the scene has no name; use file -rename first") };
-        let path = match s.scene_type {
+        let path = match scene_type {
             Some(f) => with_extension(&path, f),
             None => path,
         };
-        let format = match s.scene_type {
+        let format = match scene_type {
             Some(f) if extension(&path).is_empty() || ty.is_some() => f,
             _ => Format::of_path(path.trim_end_matches(".gz")),
         };
         let compress = a.bool("compress");
         let path = if compress && !a.bool("preserveName") && extension(&path) != "gz" { format!("{path}.gz") } else { path };
+        if crate::ma_file::save_opened_history(s, &path, format, compress).map_err(CommandError::new)? {
+            return Ok(json!(path));
+        }
         // Written to a file beside it first, then put in its place: a save that fails leaves the old file.
         let p = Path::new(&path);
         let dir = p.parent().map(Path::to_path_buf).unwrap_or_default();

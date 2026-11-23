@@ -1190,6 +1190,52 @@ fn the_file_command() {
 }
 
 #[test]
+fn re_saving_an_opened_scene_keeps_its_bevel_history() {
+    let text = r#"//Maya ASCII 2026 scene
+fileInfo "purpose" "original";
+createNode transform -n "assembly";
+createNode transform -n "piece" -p "assembly";
+    setAttr ".tx" 0.12345678901234568;
+createNode mesh -n "pieceShape" -p "piece";
+createNode polyCube -n "cubeInput";
+createNode polyBevel3 -n "bevelInput";
+    setAttr ".sg" 3;
+connectAttr "cubeInput.out" "bevelInput.ip";
+connectAttr "bevelInput.out" "pieceShape.i";
+"#;
+    let (binary, _) = aztek_scene::mb_write::encode(text, &aztek_scene::mb_write::Hints {
+        linear: "cm".into(), angle: "deg".into(), time: "film".into(), fps: 24.0,
+        dag_roots: ["assembly".into()].into(), transform_types: ["transform".into()].into(),
+    });
+    for (ext, input) in [("ma", text.as_bytes()), ("mb", &binary)] {
+        let source = temp(&format!("opened_bevel.{ext}"));
+        let copy = temp(&format!("copied_bevel.{ext}"));
+        let mut s = Session::new();
+        std::fs::write(&source, input).unwrap();
+        run(&mut s, "file", json!({"args": [&source], "open": true, "force": true}));
+        let metadata = run(&mut s, "fileInfo", json!({"args": ["purpose"], "query": true}));
+        assert!(s.run("fileInfo", json!({"args": ["purpose", "changed"]})).is_err());
+        assert!(s.run("fileInfo", json!({"query": true, "remove": "purpose"})).is_err());
+        assert_eq!(run(&mut s, "fileInfo", json!({"args": ["purpose"], "query": true})), metadata);
+        assert!(!s.is_modified());
+        let format = ma_file::Format::of_path(&source);
+        ma_file::save_scene(&mut s, &source, format).unwrap();
+        assert_eq!(std::fs::read(&source).unwrap(), input, "{ext}: Save rewrote the source");
+        run(&mut s, "file", json!({"args": [&copy], "s": true}));
+        assert_eq!(std::fs::read(&copy).unwrap(), input, "{ext}: Save As rewrote the file");
+        std::fs::write(&copy, b"external edit").unwrap();
+        assert!(ma_file::save_scene(&mut s, &copy, format).is_err());
+        assert_eq!(std::fs::read(&copy).unwrap(), b"external edit");
+
+        run(&mut s, "file", json!({"args": [&source], "open": true, "force": true}));
+        assert!(s.run("file", json!({"args": [&source], "exportAll": true})).is_err());
+        run(&mut s, "setAttr", json!({"args": ["piece.tx", 2.0]}));
+        assert!(s.run("file", json!({"args": [&source], "save": true})).is_err());
+        assert_eq!(std::fs::read(&source).unwrap(), input, "{ext}: blocked save touched the source");
+    }
+}
+
+#[test]
 fn only_the_two_scene_types() {
     let mut s = Session::new();
     run(&mut s, "polyCube", json!({"name": "box"}));

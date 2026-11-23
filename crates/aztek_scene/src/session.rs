@@ -330,7 +330,11 @@ impl CommandHost for Session {
         crate::last_op::command_started(self, name, call);
     }
     fn command_starting(&mut self, name: &str, args: &mut aztek_ops::Args) -> Result<(), CommandError> {
-        crate::messages::before(self, name, args)
+        crate::messages::before(self, name, args)?;
+        if let Some(source) = &mut self.extras.opened_history {
+            source.note_command(name, args)?;
+        }
+        Ok(())
     }
     fn command_ended(&mut self, name: &str, args: &aztek_ops::Args, ok: bool) {
         crate::messages::after(self, name, args, ok);

@@ -3905,9 +3905,12 @@ impl Drop for ReadingGuard {
 
 /// Reads .ma text into the session. `import` adds to the scene; otherwise the scene should already be empty.
 pub fn read_text(s: &mut Session, text: &str, import: bool) -> Vec<String> {
+    read_doc(s, Doc::parse(text), import)
+}
+
+fn read_doc(s: &mut Session, mut doc: Doc, import: bool) -> Vec<String> {
     let _reading = ReadingGuard::on();
     register_types();
-    let mut doc = Doc::parse(text);
     if !import {
         s.extras.file_info = doc.file_info.clone();
     }
@@ -6006,28 +6009,156 @@ struct SceneText {
 }
 
 fn read_scene_text(path: &str) -> Result<SceneText, String> {
-    let mut bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    decode_scene_text(path, &bytes)
+}
+
+fn decode_scene_text(path: &str, bytes: &[u8]) -> Result<SceneText, String> {
     // A file saved with -compress is gzipped.
-    if bytes.starts_with(&[0x1f, 0x8b]) {
-        bytes = crate::file_more::gunzip(&bytes).map_err(|e| format!("{path}: {e}"))?;
-    }
-    if crate::mb_file::is_binary(&bytes) {
-        let mut c = crate::mb_file::convert(&bytes).map_err(|e| format!("{path}: {e}"))?;
+    let uncompressed;
+    let bytes = if bytes.starts_with(&[0x1f, 0x8b]) {
+        uncompressed = crate::file_more::gunzip(bytes).map_err(|e| format!("{path}: {e}"))?;
+        &uncompressed
+    } else {
+        bytes
+    };
+    if crate::mb_file::is_binary(bytes) {
+        let mut c = crate::mb_file::convert(bytes).map_err(|e| format!("{path}: {e}"))?;
         let text = std::mem::take(&mut c.text);
         return Ok(SceneText { text, binary: Some(c) });
     }
     if extension(path) == "mb" {
         return Err(format!("{path}: not a binary scene file"));
     }
-    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let text = String::from_utf8_lossy(bytes).into_owned();
     if text.trim_start().starts_with('{') && text.contains("\"aztek\"") {
         return Err(format!("{path}: a scene in Aztek's old .aztek format, which is no longer read; open it in an earlier Aztek and save it as .ma or .mb"));
     }
     Ok(SceneText { text, binary: None })
 }
 
+pub(crate) struct OpenedHistory {
+    path: std::path::PathBuf,
+    identity: same_file::Handle,
+    format: Format,
+    bytes: Vec<u8>,
+    version: u64,
+    edited: bool,
+}
+
+impl OpenedHistory {
+    fn new(path: &str, format: Format, file: std::fs::File, bytes: Vec<u8>) -> std::io::Result<Self> {
+        Ok(Self {
+            path: canonical_parent_path(path)?,
+            identity: same_file::Handle::from_file(file)?,
+            format,
+            bytes,
+            version: 0,
+            edited: false,
+        })
+    }
+
+    pub(crate) fn note_command(&mut self, name: &str, args: &Args) -> Result<(), aztek_ops::CommandError> {
+        // Metadata changes have no undo step and cannot be saved while preserving the opened history.
+        if name == "fileInfo" && (!args.bool("query") || args.has("remove")) {
+            fail!("Changing file metadata in a scene with bevel history is unsupported.");
+        }
+        // These queries and UI settings do not change anything in the scene file.
+        let reads = matches!(name, "ls" | "getAttr" | "nodeType" | "objExists" | "listHistory" | "listConnections"
+            | "listRelatives" | "listAttr" | "attributeQuery" | "listCameras" | "about" | "commandInfo"
+            | "connectionInfo" | "polyEvaluate" | "isConnected" | "referenceQuery" | "aztekTimeControlState" | "keyTimes"
+            | "aztekSoundPeaks" | "constructionHistory" | "contextInfo" | "currentCtx" | "renderer"
+            | "scriptJob" | "selectScope" | "setToolTo");
+        let file_bookkeeping = name == "file" && (args.bool("save") || args.has("rename")
+            || (args.positional.is_empty() && args.flags.len() == 1 && args.flags.contains_key("modified")));
+        self.edited |= !(args.bool("query") || file_bookkeeping || reads);
+        Ok(())
+    }
+
+    fn check_source(&self) -> std::io::Result<()> {
+        use std::io::{Error, ErrorKind, Read};
+        let mut file = std::fs::File::open(&self.path)?;
+        if same_file::Handle::from_file(file.try_clone()?)? != self.identity {
+            return Err(Error::new(ErrorKind::InvalidData, "the opened scene file was replaced"));
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        if self.bytes != bytes {
+            return Err(Error::new(ErrorKind::InvalidData, "the opened scene file changed on disk"));
+        }
+        Ok(())
+    }
+
+    fn copy_to(&mut self, path: &std::path::Path) -> std::io::Result<()> {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+        let temp = path.with_file_name(format!(".aztek-save-{}-{}.tmp", std::process::id(), NEXT_TEMP.fetch_add(1, Ordering::Relaxed)));
+        let mut staged = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&temp)?;
+        let result = (|| {
+            staged.write_all(&self.bytes)?;
+            staged.sync_all()?;
+            let identity = same_file::Handle::from_file(staged.try_clone()?)?;
+            self.check_source()?;
+            std::fs::hard_link(&temp, path)?;
+            self.path = path.to_path_buf();
+            self.identity = identity;
+            Ok(())
+        })();
+        drop(staged);
+        let _ = std::fs::remove_file(&temp);
+        result
+    }
+}
+
+fn canonical_parent_path(path: &str) -> std::io::Result<std::path::PathBuf> {
+    use std::path::Path;
+    let target = Path::new(path);
+    let parent = target.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let name = target.file_name().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "expected a file name"))?;
+    Ok(std::fs::canonicalize(parent)?.join(name))
+}
+
+pub fn protects_opened_history(s: &Session) -> bool {
+    s.extras.opened_history.is_some()
+}
+
+pub(crate) fn save_opened_history(s: &mut Session, path: &str, format: Format, compress: bool) -> Result<bool, String> {
+    let Some(source) = &mut s.extras.opened_history else { return Ok(false) };
+    if source.edited || source.version != s.graph.version() {
+        return Err("This scene contains bevel history. Saving changes to it is unsupported because the history may be lost.".into());
+    }
+    if compress || source.format != format || source.bytes.starts_with(&[0x1f, 0x8b]) {
+        return Err("This scene contains bevel history. Save it in its original format to keep that history.".into());
+    }
+    let target = canonical_parent_path(path).map_err(|e| format!("{path}: {e}"))?;
+    if target.parent() != source.path.parent() {
+        return Err("Save this scene in the original folder so relative assets still resolve.".into());
+    }
+    source.check_source().map_err(|e| format!("{path}: {e}"))?;
+    if target != source.path {
+        source.copy_to(&target).map_err(|e| format!("{path}: {e}"))?;
+    }
+    s.scene_path = Some(path.into());
+    s.scene_type = Some(format);
+    s.mark_saved();
+    Ok(true)
+}
+
+fn protect_export_destination(s: &Session, path: &str) -> Result<(), String> {
+    if let Some(source) = &s.extras.opened_history {
+        if canonical_parent_path(path).is_ok_and(|target| target == source.path)
+            || same_file::Handle::from_path(path).is_ok_and(|target| target == source.identity)
+        {
+            return Err("Choose a different export file to keep the opened scene's bevel history.".into());
+        }
+    }
+    Ok(())
+}
+
 /// Writes the scene to path in the format given. Returns warnings; does not change the scene's name.
 pub fn write_file(s: &mut Session, path: &str, format: Format, only: Option<&[NodeId]>) -> Result<Vec<String>, String> {
+    protect_export_destination(s, path)?;
     if s.commands.find("aztekUsdBeforeSave").is_some() {
         let _ = s.run("aztekUsdBeforeSave", json!({}));
     }
@@ -6052,6 +6183,7 @@ pub fn write_file(s: &mut Session, path: &str, format: Format, only: Option<&[No
 /// file -exportAnim and the like: the curves given and what they drive, written as connections to nodes the file
 /// doesn't hold, which an import makes to the nodes of those names.
 pub(crate) fn write_anim_file(s: &mut Session, path: &str, format: Format, curves: &[NodeId]) -> Result<(), String> {
+    protect_export_destination(s, path)?;
     let mut lines = String::new();
     for &c in curves {
         let g = &s.graph;
@@ -6126,6 +6258,9 @@ fn binary_bytes(s: &mut Session, path: &str, only: Option<&[NodeId]>) -> (Vec<u8
 
 /// Saves under path and makes it the scene's name.
 pub fn save_scene(s: &mut Session, path: &str, format: Format) -> Result<Vec<String>, String> {
+    if save_opened_history(s, path, format, false)? {
+        return Ok(Vec::new());
+    }
     let w = write_file(s, path, format, None)?;
     s.scene_path = Some(path.to_string());
     s.scene_type = Some(format);
@@ -6135,7 +6270,19 @@ pub fn save_scene(s: &mut Session, path: &str, format: Format) -> Result<Vec<Str
 
 /// Replaces the scene with the file's, `.ma` or `.mb`. Undo restarts.
 pub fn open_scene(s: &mut Session, path: &str) -> Result<Vec<String>, String> {
-    let SceneText { text, binary } = read_scene_text(path)?;
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(|e| format!("{path}: {e}"))?;
+    let SceneText { text, binary } = decode_scene_text(path, &bytes)?;
+    let doc = Doc::parse(&text);
+    let format = if binary.is_some() { Format::Mb } else { Format::Ma };
+    // ponytail: protect bevel history first. Extend when the reader and writer can verify more chains.
+    let source = if doc.nodes.iter().any(|node| node.ty == "polyBevel3") {
+        Some(OpenedHistory::new(path, format, file, bytes).map_err(|e| format!("{path}: {e}"))?)
+    } else {
+        None
+    };
     let _ = s.run("newScene", json!({}));
     // Here and not at the next command: a script can use a camera straight after opening a file.
     crate::cameras::make_defaults(&mut s.graph);
@@ -6144,7 +6291,7 @@ pub fn open_scene(s: &mut Session, path: &str) -> Result<Vec<String>, String> {
     g.begin_batch();
     g.undo_stack_mut().set_enabled(false);
     let mut warnings = binary_warnings(&binary);
-    warnings.extend(read_text(s, &text, false));
+    warnings.extend(read_doc(s, doc, false));
     // The scene takes on the file's units, as it does its frame rate. A binary file's values are in internal
     // units, so its text says centimetres and radians and its own units come from its header.
     let (lin, ang) = match &binary {
@@ -6159,9 +6306,13 @@ pub fn open_scene(s: &mut Session, path: &str) -> Result<Vec<String>, String> {
     g.end_batch();
     let _ = s.run("flushUndo", json!({}));
     s.scene_path = Some(path.to_string());
-    s.scene_type = Some(if binary.is_some() { Format::Mb } else { Format::Ma });
+    s.scene_type = Some(format);
     crate::shading::scene_was_read(s);
     s.mark_saved();
+    s.extras.opened_history = source.map(|mut source| {
+        source.version = s.graph.version();
+        source
+    });
     Ok(warnings)
 }
 

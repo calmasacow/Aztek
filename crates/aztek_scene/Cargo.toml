@@ -23,6 +23,7 @@ sysinfo.workspace = true
 manifold-rust = { version = "0.19.2", features = ["parallel"] }
 miniz_oxide = "0.8"
 regex-lite = "0.1"
+same-file = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tga", "bmp", "tiff"] }
 
 [dev-dependencies]
