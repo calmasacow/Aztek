@@ -810,7 +810,12 @@ pub extern "C" fn aztek_view_create(
                     h.shared = Some(s);
                 }
                 Err(e) => {
-                    h.core.push(format!("// Error: Vulkan: {e} //"), core::LineKind::Error);
+                    let help = if e.downcast_ref::<ash::vk::Result>() == Some(&ash::vk::Result::ERROR_INCOMPATIBLE_DRIVER) {
+                        ". The viewport needs a Vulkan-compatible graphics driver. Update the driver for your GPU. If your GPU does not support Vulkan, the viewport will stay blank."
+                    } else {
+                        ""
+                    };
+                    h.core.push(format!("// Error: Vulkan: {e}{help} //"), core::LineKind::Error);
                     return 0;
                 }
             }

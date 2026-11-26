@@ -650,6 +650,9 @@ Rocky 9's Qt and has no PySide6, as there is no arm64 Linux kit or wheel.
 
 The viewport needs a Vulkan driver: NVIDIA's own driver has one, and Mesa's `mesa-vulkan-drivers` covers AMD and Intel. On macOS it
 draws through MoltenVK, which comes inside Aztek.app.
+On Windows, if Aztek says it cannot find a Vulkan driver, install the latest driver for your GPU from your laptop or GPU vendor.
+If the GPU has no Vulkan support, the viewport stays blank even when the scene contains objects.
+
 [docs/PACKAGING.md](docs/PACKAGING.md) has the details, and how the packages are built.
 
 ### Running unsigned builds
