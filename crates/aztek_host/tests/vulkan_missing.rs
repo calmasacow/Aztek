@@ -1,6 +1,8 @@
 //! A machine with no Vulkan driver (#315): the viewport fails once, says why once, and hands the reason to the panels.
 //! Needs an X display (run it under xvfb-run); without one it checks only what it can.
 
+#![cfg(target_os = "linux")]
+
 use std::ffi::{c_char, c_void, CStr};
 
 use aztek_host::{aztek_free, aztek_take_log, aztek_view_create, aztek_view_error};
