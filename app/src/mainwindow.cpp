@@ -2115,6 +2115,7 @@ bool MainWindow::confirm_unsaved() {
     QMessageBox box(QMessageBox::Warning, "Save Changes", file.isEmpty() ? "Save changes to the untitled scene?" : QString("Save changes to %1?").arg(file), QMessageBox::NoButton, this);
     QPushButton* save = box.addButton("Save", QMessageBox::AcceptRole);
     QPushButton* discard = box.addButton("Don't Save", QMessageBox::DestructiveRole);
+    discard->setShortcut(QKeySequence(Qt::Key_N));
     box.addButton("Cancel", QMessageBox::RejectRole);
     box.setDefaultButton(save);
     box.exec();
